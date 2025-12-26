@@ -137,6 +137,38 @@ Later:
 
 ---
 
+## Trust Boundaries and Untrusted Contexts
+
+A core design principle of this project is that **not all text seen by an LLM should be treated as instructions**.
+
+Modern agentic systems ingest content from multiple sources, including:
+- user input
+- retrieved documents (RAG)
+- tool outputs
+- system-level instructions
+
+Only system-level instructions are trusted. All other content is treated as **untrusted data**, even if it appears instruction-like.
+
+### Explicit message schema
+
+Each piece of context is represented as a structured message segment with:
+- a `source` (system, user, tool_output, retrieved_doc)
+- a `trust_level` (trusted or untrusted)
+- the raw `content`
+
+This prevents loss of provenance during prompt assembly and enables precise attribution during evaluation.
+
+### Non-flattening prompt assembly
+
+Rather than concatenating strings, the agent assembles prompts from typed message segments.  
+Trust metadata is preserved end-to-end and logged for every run.
+
+### Delimited prompt rendering
+
+Before execution, the final prompt is rendered with explicit trust delimiters:
+
+
+
 ## Key idea
 
 Prompt injection is not a string-matching problem.

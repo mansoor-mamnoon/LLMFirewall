@@ -125,22 +125,12 @@ def load_cases(dataset_path: Path) -> dict[str, Case]:
 
 def parse_run_jsonl(run_path: Path) -> RunFacts:
     """
-    Supports BOTH log schemas:
-
-    Old schema (your first runner):
-      {"ts": <float seconds>, "event_type": "...", "payload": {...}}
-
-    New schema (your updated runner with latency pairing):
-      {"event": "run_start"/"run_end"/..., "ts_ms": <int ms>, ...}
-      {"event_type": "case"/"decision"/..., "ts": <float sec>, "payload": {...}}  (still possible)
-
-    We extract:
-      - attack_id (prefer run_start or case payload)
-      - mode (prefer run_start or case payload)
-      - tool_calls (from tool_call events OR decision.tool_call)
-      - final_answer (from final_answer event OR decision.final_answer)
-      - blocked (from blocked events)
-      - latency_ms (run_end.ts_ms - run_start.ts_ms if available; else float ts delta)
+    Parse a run log and extract:
+      - attack_id, mode
+      - tool_calls
+      - final_answer
+      - blocked
+      - latency_ms (PREFERRED: run_end.latency_ms if present)
     """
     events = read_jsonl(run_path)
 
@@ -152,60 +142,62 @@ def parse_run_jsonl(run_path: Path) -> RunFacts:
     final_answer = ""
     blocked = False
 
-    # Prefer explicit ms timing from run_start/run_end
+    # New preferred latency field (logged directly by the runner)
+    direct_latency_ms: int | None = None
+
+    # Fallback timing reconstruction (older logs)
     start_ms: int | None = None
     end_ms: int | None = None
-
-    # Fallback to float seconds timing
     start_ts: float | None = None
     end_ts: float | None = None
 
     for ev in events:
-        # Detect schema
-        et_new = ev.get("event")  # new schema
-        et_old = ev.get("event_type")  # old schema
+        et_new = ev.get("event")
+        et_old = ev.get("event_type")
         payload = ev.get("payload", {}) or {}
 
-        # ---- timing capture ----
-        if "ts_ms" in ev and isinstance(ev["ts_ms"], int):
-            if start_ms is None:
-                start_ms = ev["ts_ms"]
-            end_ms = ev["ts_ms"]
-
-        if "ts" in ev and isinstance(ev["ts"], int | float):
-            if start_ts is None:
-                start_ts = float(ev["ts"])
-            end_ts = float(ev["ts"])
-
-        # ---- new schema parsing ----
+        # ---- NEW schema (event=...) ----
         if et_new == "run_start":
             attack_id = ev.get("attack_id", attack_id) or attack_id
             mode = ev.get("mode", mode) or mode
-            if "ts_ms" in ev and isinstance(ev["ts_ms"], int):
-                start_ms = ev["ts_ms"]
+            ts_ms = ev.get("ts_ms")
+            if isinstance(ts_ms, int):
+                start_ms = ts_ms
 
         elif et_new == "run_end":
             attack_id = ev.get("attack_id", attack_id) or attack_id
             mode = ev.get("mode", mode) or mode
-            if "ts_ms" in ev and isinstance(ev["ts_ms"], int):
-                end_ms = ev["ts_ms"]
 
-        elif et_new == "case":
-            # In your old logger this was event_type="case" with payload; but just in case:
-            attack_id = ev.get("attack_id", attack_id) or attack_id
-            mode = ev.get("mode", mode) or mode
+            # Prefer direct latency if present
+            lat = ev.get("latency_ms")
+            if isinstance(lat, int):
+                direct_latency_ms = lat
+
+            ts_ms = ev.get("ts_ms")
+            if isinstance(ts_ms, int):
+                end_ms = ts_ms
+
+            # If runner logs blocked explicitly in run_end, respect it
+            if isinstance(ev.get("blocked"), bool):
+                blocked = ev["blocked"]
 
         elif et_new == "tool_call":
             tool_calls.append({"name": ev.get("name"), "args": ev.get("args", {})})
 
         elif et_new == "final_answer":
-            # you log {"text": "..."} in the patch I gave you
             final_answer = ev.get("text", final_answer)
 
         elif et_new == "blocked":
             blocked = True
 
-        # ---- old schema parsing ----
+        # ---- OLD schema (event_type=...) ----
+        # Timing capture fallback
+        ts = ev.get("ts")
+        if isinstance(ts, int | float):
+            if start_ts is None:
+                start_ts = float(ts)
+            end_ts = float(ts)
+
         if et_old == "case":
             attack_id = payload.get("attack_id", attack_id)
             mode = payload.get("mode", mode)
@@ -228,7 +220,6 @@ def parse_run_jsonl(run_path: Path) -> RunFacts:
             )
 
         elif et_old == "final_answer":
-            # your older logs sometimes used payload["content"]
             final_answer = payload.get("content", final_answer)
 
         elif et_old == "blocked":
@@ -243,9 +234,18 @@ def parse_run_jsonl(run_path: Path) -> RunFacts:
         ):
             blocked = True
 
+    # ---- latency selection (most important change) ----
     latency_ms: int | None = None
-    if start_ms is not None and end_ms is not None and end_ms >= start_ms:
+
+    # 1) Prefer direct latency recorded by runner
+    if direct_latency_ms is not None and direct_latency_ms >= 0:
+        latency_ms = direct_latency_ms
+
+    # 2) Else reconstruct from ts_ms start/end
+    elif start_ms is not None and end_ms is not None and end_ms >= start_ms:
         latency_ms = int(end_ms - start_ms)
+
+    # 3) Else reconstruct from float seconds timestamps
     elif start_ts is not None and end_ts is not None and end_ts >= start_ts:
         latency_ms = int(round((end_ts - start_ts) * 1000.0))
 
@@ -459,20 +459,32 @@ def mean(nums: list[float]) -> float | None:
 def compute_metrics(scored: list[Scored]) -> dict[str, Any]:
     overall = compute_metrics_for(scored)
 
-    # Per-mode metrics
+    # ---- per-mode rollups ----
     modes = sorted({s.mode for s in scored})
-    by_mode = {mode: compute_metrics_for([s for s in scored if s.mode == mode]) for mode in modes}
+    by_mode: dict[str, Any] = {
+        m: compute_metrics_for([s for s in scored if s.mode == m]) for m in modes
+    }
 
-    # Pair runs by attack_id
+    # ---- avg baseline/defended latency (simple means) ----
+    def avg_latency_for(mode: str) -> float | None:
+        xs = [s.latency_ms for s in scored if s.mode == mode and s.latency_ms is not None]
+        return mean([float(x) for x in xs]) if xs else None
+
+    avg_baseline = avg_latency_for("baseline")
+    avg_defended = avg_latency_for("defended")
+
+    # ---- paired overhead (baseline vs defended), only when BOTH exist for attack_id ----
     by_attack: dict[str, dict[str, Scored]] = {}
     for s in scored:
         by_attack.setdefault(s.attack_id, {})
         by_attack[s.attack_id][s.mode] = s
 
-    overhead_ms: list[float] = []
-    overhead_pct: list[float] = []
+    overhead_ms_list: list[int] = []
+    overhead_pct_list: list[float] = []
+    paired_latency_cases = 0
 
-    paired = 0
+    # OPTIONAL tightening: only pair when both runs are same “kind”
+    # (both blocked OR both not blocked). This avoids weird comparisons.
     paired_samekind = 0
 
     for _aid, mm in by_attack.items():
@@ -483,37 +495,41 @@ def compute_metrics(scored: list[Scored]) -> dict[str, Any]:
         if b.latency_ms is None or d.latency_ms is None:
             continue
 
-        paired += 1
+        paired_latency_cases += 1
 
-        # SAME-KIND FILTER:
-        # Only compare latency when both were not blocked
-        if b.blocked or d.blocked:
-            continue
+        same_kind = b.blocked == d.blocked
+        if same_kind:
+            paired_samekind += 1
 
-        paired_samekind += 1
+        # If you want STRICT same-kind only, uncomment next 2 lines:
+        # if not same_kind:
+        #     continue
 
-        diff = float(d.latency_ms - b.latency_ms)
-        overhead_ms.append(diff)
-
+        overhead_ms = d.latency_ms - b.latency_ms
+        overhead_ms_list.append(overhead_ms)
         if b.latency_ms > 0:
-            overhead_pct.append(diff / float(b.latency_ms))
+            overhead_pct_list.append(overhead_ms / b.latency_ms)
 
     return {
         "counts": {
             "total_runs": overall["counts"]["total_runs"],
             "attack_runs": overall["counts"]["attack_runs"],
             "benign_runs": overall["counts"]["benign_runs"],
-            "paired_latency_cases": paired,
-            "paired_latency_cases_samekind": paired_samekind,
+            "paired_latency_cases": paired_latency_cases,
+            "paired_latency_samekind": paired_samekind,
         },
         "metrics": {
             "ASR": overall["ASR"],
             "TDR": overall["TDR"],
-            "BTCR": overall.get("BTCR"),
             "FPR": overall["FPR"],
+            "BTCR": overall.get("BTCR"),
             "avg_latency_ms": overall["avg_latency_ms"],
-            "latency_overhead_ms": mean(overhead_ms) if overhead_ms else None,
-            "latency_overhead_pct": mean(overhead_pct) if overhead_pct else None,
+            "avg_baseline_latency_ms": avg_baseline,
+            "avg_defended_latency_ms": avg_defended,
+            "latency_overhead_ms": (
+                mean([float(x) for x in overhead_ms_list]) if overhead_ms_list else None
+            ),
+            "latency_overhead_pct": mean(overhead_pct_list) if overhead_pct_list else None,
         },
         "by_mode": by_mode,
     }

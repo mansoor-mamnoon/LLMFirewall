@@ -308,6 +308,37 @@ Planned milestones:
 - Adaptive and model-generated attack synthesis
 - Real LLM integration and comparative evaluation
 
+## Day 6 — Baseline Defender v0 (static policy + denylist heuristics)
+
+**Goal:** establish a simple, reproducible baseline defender to beat.
+
+### What changed
+We added a `PolicyEngine` that runs **before** the agent chooses any action.
+
+**Actions supported**
+- `allow`: proceed normally
+- `block`: refuse immediately (stop the run)
+- `rewrite`: sanitize the user prompt (strip suspicious lines) then proceed
+- `downgrade_tools`: remove risky tools (e.g., `post_message`) then proceed
+
+**Heuristics (v0)**
+- denylist strings like: `ignore previous`, `system prompt`, `developer message`, etc.
+- role-redefinition patterns like: `you are now`, `act as`, `as the system`, etc.
+
+### Tool hardening
+In `defended` mode we enforce tool downgrades *in the runtime* by:
+1) removing disallowed tools from the `ToolSpec` list passed to the agent, and  
+2) building a per-run tool registry so removed tools cannot be executed even if requested.
+
+### How to run
+```bash
+rm -f runs/*.jsonl
+uv run python -m eval.run --dataset data/eval_dataset.jsonl --mode baseline
+uv run python -m eval.run --dataset data/eval_dataset.jsonl --mode defended
+uv run python eval/report.py --dataset data/eval_dataset.jsonl --runs runs
+sed -n '1,200p' eval/report.md
+
+
 ## Key idea
 
 Prompt injection is not a string-matching problem.

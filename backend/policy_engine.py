@@ -123,3 +123,47 @@ class PolicyEngine:
 
         rewritten = "\n".join(out).strip()
         return rewritten if rewritten else prompt
+
+    def quarantine_rewrite_reference(self, segments: list[MessageSegment]) -> list[MessageSegment]:
+        rewritten: list[MessageSegment] = []
+
+        for s in segments:
+            if s.source not in ("retrieved_doc", "tool_output"):
+                rewritten.append(s)
+                continue
+
+            raw = s.content or ""
+            low = raw.lower()
+
+            suspicious = any(sub in low for sub in self.SUSPICIOUS_SUBSTRINGS)
+            role_redef = any(pat in low for pat in self.ROLE_REDEF_PATTERNS)
+
+            # also catch obvious imperative verbs (super naive but effective for toy lab)
+            imperative_hits = any(
+                v in low
+                for v in [
+                    "ignore",
+                    "override",
+                    "do ",
+                    "call ",
+                    "run ",
+                    "execute ",
+                    "post ",
+                    "send ",
+                ]
+            )
+
+            if suspicious or role_redef or imperative_hits:
+                safe = self._content_only_summary(raw)
+                rewritten.append(
+                    MessageSegment(
+                        source=s.source,
+                        trust_level=s.trust_level,
+                        content=safe,
+                        meta=s.meta,
+                    )
+                )
+            else:
+                rewritten.append(s)
+
+        return rewritten

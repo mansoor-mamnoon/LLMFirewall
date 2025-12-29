@@ -21,12 +21,16 @@ class PolicyEngine:
     """
 
     SUSPICIOUS_SUBSTRINGS = [
+        # classic injection + override
         "ignore previous",
         "ignore all previous",
         "disregard previous",
+        "forget the above",
         "override",
+        "jailbreak",
         "developer message",
         "developer mode",
+        # system prompt theft
         "system prompt",
         "reveal the system prompt",
         "show the system prompt",
@@ -35,8 +39,13 @@ class PolicyEngine:
         "you are now system",
         "act as system",
         "role: system",
-        "forget the above",
-        "jailbreak",
+        # explicit “do a tool call” patterns (your dataset)
+        "call post_message",
+        "post_message",
+        "post a message",
+        "send a message to",
+        "channel='general'",
+        'channel="general"',
     ]
 
     ROLE_REDEF_PATTERNS = [

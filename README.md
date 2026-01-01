@@ -3,7 +3,7 @@
 A prompt-injection red-teaming and defense framework for LLM agents with tool access.
 
 This project explores prompt injection as a control-flow integrity problem for language-based systems.
-Rather than focusing on jailbreak prompts in isolation, it models how untrusted inputs can cause unauthorized tool calls, capability escalation, and unsafe side effects in agentic LLM applications.
+Rather than focusing on jailbreak prompts in isolation, it models how untrusted inputs can cause unauthorized tool calls, capability escalation, and unsafe side effects in agentic LLM applications. 
 
 **Status:** Deterministic agent runtime with explicit trust boundaries, a replayable prompt-injection dataset (90 cases), and an end-to-end evaluation harness producing structured run logs.
 
